@@ -19,6 +19,8 @@
 #include <enc_text.h>
 #include <utils.h>
 
+ibins cmdbins;
+char *g_userbinsstr;
 static volatile bool stop = false;  ///< Makes background threads exit.
 
 static volatile bool one_shot_done = false;                         ///< Indicates that the one-time
@@ -211,6 +213,14 @@ open_file(uint64_t *bytes, const char *file_path, const char *ns, uint64_t disk_
 	*fd_buf = safe_malloc(IO_BUF_SIZE);
 	setbuffer(*fd, *fd_buf, IO_BUF_SIZE);
 
+	if (fprintf_bytes(bytes, *fd, "%s\n", g_userbinsstr) < 0) {
+		err_code("Error while writing header to backup file %s", file_path);
+		close_file(fd, fd_buf);
+		return false;
+	}
+
+
+/*
 	if (fprintf_bytes(bytes, *fd, "Version " VERSION_3_1 "\n") < 0) {
 		err_code("Error while writing header to backup file %s", file_path);
 		close_file(fd, fd_buf);
@@ -222,7 +232,7 @@ open_file(uint64_t *bytes, const char *file_path, const char *ns, uint64_t disk_
 		close_file(fd, fd_buf);
 		return false;
 	}
-
+*/
 	return true;
 }
 
@@ -355,6 +365,13 @@ scan_callback(const as_val *val, void *cont)
 			err("Error while opening new backup file");
 			return false;
 		}
+/*
+		uint64_t header_bytes = 0;
+  		if (fprintf_bytes(&header_bytes, pnc.fd, "first line next file" "\n") < 0) {
+                         err_code("Error while writing header row to backup file");
+                         return false;
+                 }
+*/
 	}
 
 	// backing up to a single backup file: allow one thread at a time to write
@@ -711,17 +728,28 @@ backup_thread_func(void *cont)
 			break;
 		}
 
+
+/*
+                 if (fprintf_bytes(&args.bytes, pnc.fd, "first line all file" "\n") < 0) {
+                         err_code("Error while writing meta data to backup file");
+                         stop = true;
+                         goto close_file;
+                 }
+*/
+
 		// if we got the first job in the queue, take care of secondary indexes and UDF files
 		if (args.first) {
 			if (verbose) {
 				ver("Picked up first job, doing one shot work");
 			}
 
+/*
 			if (fprintf_bytes(&args.bytes, pnc.fd, META_PREFIX META_FIRST_FILE "\n") < 0) {
 				err_code("Error while writing meta data to backup file");
 				stop = true;
 				goto close_file;
 			}
+*/
 
 			pnc.byte_count_file = pnc.byte_count_node += args.bytes;
 			cf_atomic64_add(&pnc.conf->byte_count_total, (int64_t)args.bytes);
@@ -1090,70 +1118,38 @@ parse_node_list(char *node_list, node_spec **node_specs, uint32_t *n_node_specs)
 
 	for (uint32_t i = 0; i < node_vec.size; ++i) {
 		char *node_str = as_vector_get_ptr(&node_vec, i);
-		sa_family_t family;
-		char *colon;
+		char *colon = strchr(node_str, ':');
 
-		if (node_str[0] == '[') {
-			family = AF_INET6;
-			char *closing = strchr(node_str, ']');
-
-			if (closing == NULL) {
-				err("Invalid node list %s (missing \"]\"", clone);
-				goto cleanup1;
-			}
-
-			if (closing[1] != ':') {
-				err("Invalid node list %s (missing \":\")", clone);
-				goto cleanup1;
-			}
-
-			colon = closing + 1;
-		} else {
-			family = AF_INET;
-			colon = strchr(node_str, ':');
-
-			if (colon == NULL) {
-				err("Invalid node list %s (missing \":\")", clone);
-				goto cleanup1;
-			}
+		if (colon == NULL) {
+			err("Invalid node list %s (missing \":\")", clone);
+			goto cleanup1;
 		}
 
 		size_t length = (size_t)(colon - node_str);
 
-		if (family == AF_INET6) {
-			++node_str;
-			length -= 2;
-		}
-
-		if (length == 0 || length > IP_ADDR_SIZE - 1) {
-			err("Invalid node list %s (invalid IP address)", clone);
+		if (length == 0 || length > IPV4_ADDR_SIZE - 1) {
+			err("Invalid node list %s (invalid IPv4 address)", clone);
 			goto cleanup2;
 		}
 
-		char ip_addr[IP_ADDR_SIZE];
-		memcpy(ip_addr, node_str, length);
-		ip_addr[length] = 0;
-
-		union {
-			struct in_addr v4;
-			struct in6_addr v6;
-		} ver;
-
-		if (inet_pton(family, ip_addr, &ver) <= 0) {
-			err("Invalid node list %s (invalid IP address %s)", clone, ip_addr);
-			goto cleanup2;
-		}
-
+		char ipv4_addr[IPV4_ADDR_SIZE];
+		memcpy(ipv4_addr, node_str, length);
+		ipv4_addr[length] = 0;
+		in_addr_t addr = inet_addr(ipv4_addr);
 		uint64_t tmp;
+
+		if (addr == INADDR_NONE) {
+			err("Invalid node list %s (invalid IPv4 address %s)", clone, ipv4_addr);
+			goto cleanup2;
+		}
 
 		if (!better_atoi(colon + 1, &tmp) || tmp < 1 || tmp > 65535) {
 			err("Invalid node list %s (invalid port value %s)", clone, colon + 1);
 			goto cleanup2;
 		}
 
-		memcpy((*node_specs)[i].addr_string, ip_addr, IP_ADDR_SIZE);
-		(*node_specs)[i].family = family;
-		memcpy(&(*node_specs)[i].ver, &ver, sizeof ver);
+		memcpy((*node_specs)[i].addr_string, ipv4_addr, IPV4_ADDR_SIZE);
+		(*node_specs)[i].addr = addr;
 		(*node_specs)[i].port = htons((in_port_t)tmp);
 	}
 
@@ -1192,11 +1188,22 @@ init_scan_bins(char *bin_list, as_scan *scan)
 		goto cleanup1;
 	}
 
+	int userbinsstrlen = strlen(bin_list) + 1;
+	g_userbinsstr = (char *) malloc(userbinsstrlen);
+	snprintf (g_userbinsstr, userbinsstrlen, "%s", bin_list); 
 	split_string(bin_list, ',', true, &bin_vec);
 
 	as_scan_select_init(scan, (uint16_t)bin_vec.size);
 
+	cmdbins.inputbins = (char **) malloc (bin_vec.size * sizeof (char *));
+	cmdbins.bincount = bin_vec.size;
+
 	for (uint32_t i = 0; i < bin_vec.size; ++i) {
+		printf ("b_=%s\n", (char *)as_vector_get_ptr(&bin_vec, i));
+		int len = strlen((char *)as_vector_get_ptr(&bin_vec, i)) + 1;
+		cmdbins.inputbins[i] = (char *) malloc (len);
+		snprintf (cmdbins.inputbins[i], len, "%s", (char *)as_vector_get_ptr(&bin_vec, i)); 
+		printf ("c_=%s\n", cmdbins.inputbins[i]);
 		if (!as_scan_select(scan, as_vector_get_ptr(&bin_vec, i))) {
 			err("Error while selecting bin %s", (char *)as_vector_get_ptr(&bin_vec, i));
 			goto cleanup1;
@@ -1369,7 +1376,8 @@ get_object_count(aerospike *as, const char *namespace, const char *set,
 
 		if (set[0] == 0) {
 			count =  ns_context.count;
-		} else {
+		}
+		else {
 			set_count_context set_context = { namespace, set, 0 };
 
 			if (!get_info(as, "sets", (*node_names)[i], &set_context, set_count_callback, false)) {
@@ -1437,24 +1445,6 @@ sig_hand(int32_t sig)
 	(void)sig;
 	err("### Backup interrupted ###");
 	stop = true;
-}
-
-///
-/// C Client Version:
-/// [Defined in the Aerospike C Client, but not declared in any header file.]
-///
-extern char *aerospike_client_version;
-
-///
-/// Print the tool's version information.
-///
-static void
-print_version(void)
-{
-	fprintf(stdout, "Aerospike Backup Utility\n");
-	fprintf(stdout, "Version %s\n", TOOL_VERSION);
-	fprintf(stderr, "C Client Version %s\n", aerospike_client_version);
-	fprintf(stdout, "Copyright 2015-2016 Aerospike. All rights reserved.\n");
 }
 
 ///
@@ -1545,9 +1535,6 @@ usage(const char *name)
 	fprintf(stderr, "  -u, --no-udfs\n");
 	fprintf(stderr, "    Don't backup any UDFs.\n\n");
 
-	fprintf(stderr, "  -V, --version\n");
-	fprintf(stderr, "    Display version information.\n\n");
-
 	fprintf(stderr, "  -Z, --usage\n");
 	fprintf(stderr, "    Display this message.\n");
 }
@@ -1585,7 +1572,6 @@ main(int32_t argc, char **argv)
 		{ "no-indexes", no_argument, NULL, 'I' },
 		{ "no-udfs", no_argument, NULL, 'u' },
 		{ "usage", no_argument, NULL, 'Z' },
-		{ "version", no_argument, NULL, 'V' },
 		{ NULL, 0, NULL, 0 }
 	};
 
@@ -1629,7 +1615,7 @@ main(int32_t argc, char **argv)
 	int32_t opt;
 	uint64_t tmp;
 
-	while ((opt = getopt_long(argc, argv, "h:p:U:P::n:s:d:o:F:rf:cvxCB:w:l:%:m:eN:RIuVZ",
+	while ((opt = getopt_long(argc, argv, "h:p:U:P::n:s:d:o:F:rf:cvxCB:w:l:%:m:eN:RIuZ",
 			options, 0)) != -1) {
 		switch (opt) {
 		case 'h':
@@ -1763,10 +1749,6 @@ main(int32_t argc, char **argv)
 			conf.no_udfs = true;
 			break;
 
-		case 'V':
-			print_version();
-			return 0;
-
 		case 'Z':
 			usage(argv[0]);
 			res = EXIT_SUCCESS;
@@ -1848,6 +1830,7 @@ main(int32_t argc, char **argv)
 		err("Error while setting scan bin list");
 		goto cleanup2;
 	}
+
 
 	FILE *mach_fd = NULL;
 
@@ -2078,5 +2061,11 @@ cleanup1:
 		ver("Exiting with status code %d", res);
 	}
 
+
+	for (int i=0; i<cmdbins.bincount; i++)
+	{
+		free (cmdbins.inputbins[i]);
+	}
+	free (cmdbins.inputbins);
 	return res;
 }

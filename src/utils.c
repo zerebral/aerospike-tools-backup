@@ -654,46 +654,24 @@ get_node_names(as_cluster *clust, node_spec *node_specs, uint32_t n_node_specs,
 				keep = true;
 			} else {
 				keep = false;
-				as_address *addrs = node->addresses;
+				as_vector *addr_vec = &node->addresses;
 
-				for (uint32_t k = 0; !keep && k < node->address4_size; ++k) {
-					as_address *addr = &addrs[k];
-					struct sockaddr_in *v4 = (struct sockaddr_in *)&addr->addr;
+				for (uint32_t k = 0; !keep && k < addr_vec->size; ++k) {
+					as_address *addr = as_vector_get(addr_vec, k);
 
-					for (uint32_t m = 0; !keep && m < n_node_specs; ++m) {
-						if (node_specs[m].family != AF_INET) {
-							continue;
-						}
+					for (uint32_t m = 0; m < n_node_specs; ++m) {
+						//if (addr->addr.sin_addr.s_addr == node_specs[m].addr &&
+						//		addr->addr.sin_port == node_specs[m].port) {
+						//	if (verbose && pass == 2) {
+					//			ver("Found node for %s:%d", node_specs[m].addr_string,
+					//					ntohs(node_specs[m].port));
+					//		}
 
-						keep = v4->sin_addr.s_addr == node_specs[m].ver.v4.s_addr &&
-								v4->sin_port == node_specs[m].port;
-
-						if (keep && pass == 2 && verbose) {
-							ver("Found node for %s:%d", node_specs[m].addr_string,
-									ntohs(node_specs[m].port));
-						}
+					//		keep = true;
+					//		break;
+					//	}
 					}
 				}
-
-				for (uint32_t k = 0; !keep && k < node->address6_size; ++k) {
-					as_address *addr = &addrs[AS_ADDRESS4_MAX + k];
-					struct sockaddr_in6 *v6 = (struct sockaddr_in6 *)&addr->addr;
-
-					for (uint32_t m = 0; !keep && m < n_node_specs; ++m) {
-						if (node_specs[m].family != AF_INET6) {
-							continue;
-						}
-
-						keep = memcmp(&v6->sin6_addr, &node_specs[m].ver.v6, 16) == 0 &&
-								v6->sin6_port == node_specs[m].port;
-
-						if (keep && pass == 2 && verbose) {
-							ver("Found node for %s:%d", node_specs[m].addr_string,
-									ntohs(node_specs[m].port));
-						}
-					}
-				}
-
 			}
 
 			if (keep) {
@@ -747,6 +725,9 @@ get_info(aerospike *as, const char *value, const char *node_name, void *context,
 		goto cleanup0;
 	}
 
+	struct sockaddr_in *addr = as_node_get_address(node);
+	as_node_release(node);
+
 	as_policy_info policy;
 	as_policy_info_init(&policy);
 	policy.timeout = TIMEOUT;
@@ -754,14 +735,11 @@ get_info(aerospike *as, const char *value, const char *node_name, void *context,
 	char *resp = NULL;
 	as_error ae;
 
-	if (aerospike_info_node(as, &ae, &policy, node, value, &resp) != AEROSPIKE_OK) {
-		as_node_release(node);
+	if (aerospike_info_socket_address(as, &ae, &policy, addr, value, &resp) != AEROSPIKE_OK) {
 		err("Error while retrieving info from node %s - code %d: %s at %s:%d", node_name, ae.code,
-			ae.message, ae.file, ae.line);
+				ae.message, ae.file, ae.line);
 		goto cleanup0;
 	}
-
-	as_node_release(node);
 
 	if (verbose) {
 		ver("Parsing info");
@@ -800,7 +778,8 @@ get_info(aerospike *as, const char *value, const char *node_name, void *context,
 
 			*equals = 0;
 			value = equals + 1;
-		} else {
+		}
+		else {
 			key = NULL;
 			value = as_vector_get_ptr(&info_vec, i);
 		}

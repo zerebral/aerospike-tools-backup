@@ -15,6 +15,7 @@
  * the License.
  */
 
+#include <backup.h>
 #include <enc_text.h>
 #include <utils.h>
 
@@ -72,7 +73,9 @@ text_output_integer(uint64_t *bytes, FILE *fd, const char *prefix1, const char *
 {
 	as_integer *v = as_integer_fromval(val);
 
-	if (fprintf_bytes(bytes, fd, "%s%s %" PRId64 "\n", prefix1, prefix2, v->value) < 0) {
+	//if (fprintf_bytes(bytes, fd, "%s%s %" PRId64 "\n", prefix1, prefix2, v->value) < 0) {
+	//if (fprintf_bytes(bytes, fd, "|%s#%" PRId64 "|", prefix2, v->value) < 0) {
+	if (fprintf_bytes(bytes, fd, "%" PRId64, v->value) < 0) {
 		err_code("Error while writing integer to backup file");
 		return false;
 	}
@@ -99,7 +102,8 @@ text_output_double(uint64_t *bytes, FILE *fd, const char *prefix1, const char *p
 {
 	as_double *v = as_double_fromval(val);
 
-	if (fprintf_bytes(bytes, fd, "%s%s %.17g\n", prefix1, prefix2, v->value) < 0) {
+	//if (fprintf_bytes(bytes, fd, "|%s#%.17g|", prefix2, v->value) < 0) {
+	if (fprintf_bytes(bytes, fd, "%.17g", v->value) < 0) {
 		err_code("Error while writing double to backup file");
 		return false;
 	}
@@ -119,24 +123,40 @@ text_output_double(uint64_t *bytes, FILE *fd, const char *prefix1, const char *p
 ///
 /// @result         `true`, if successful.
 ///
+
 static bool
-text_output_data(uint64_t *bytes, FILE *fd, const char *prefix1, const char *prefix2,
-		void *buffer, size_t size)
+text_output_data_1(uint64_t *bytes, FILE *fd, const char *prefix2, void *buffer, size_t size)
 {
-	if (fprintf_bytes(bytes, fd, "%s%s %zu ", prefix1, prefix2, size) < 0) {
-		err_code("Error while writing data to backup file [1]");
+	if (fwrite_bytes(bytes, buffer, size, 1, fd) != 1) {
+		err_code("Error while writing data to backup file [2]");
 		return false;
 	}
+	return true;
+}
+
+static bool
+text_output_data(uint64_t *bytes, FILE *fd, const char *prefix2, void *buffer, size_t size)
+{
+	if (strcmp(prefix2, "") == 0)
+		return true;
+
+	//if (fprintf_bytes(bytes, fd, "|%s#", prefix2) < 0) {
+	//	err_code("Error while writing data to backup file [1]");
+	//	return false;
+	//}
 
 	if (fwrite_bytes(bytes, buffer, size, 1, fd) != 1) {
 		err_code("Error while writing data to backup file [2]");
 		return false;
 	}
+	//fprintf_bytes(bytes, fd, "%s", "|");
 
-	if (fprintf_bytes(bytes, fd, "\n") < 0) {
-		err_code("Error while writing data to backup file [3]");
-		return false;
-	}
+
+	//if (fprintf_bytes(bytes, fd, ",") < 0) {
+	//	err_code("Error while writing data to backup file [3]");
+	//	return false;
+	//}
+
 
 	return true;
 }
@@ -154,8 +174,7 @@ text_output_data(uint64_t *bytes, FILE *fd, const char *prefix1, const char *pre
 /// @result         `true`, if successful.
 ///
 static bool
-text_output_data_enc(uint64_t *bytes, FILE *fd, const char *prefix1, const char *prefix2,
-		void *buffer, uint32_t size)
+text_output_data_enc(uint64_t *bytes, FILE *fd, const char *prefix2, void *buffer, uint32_t size)
 {
 	uint32_t enc_size = cf_b64_encoded_len(size);
 
@@ -167,7 +186,7 @@ text_output_data_enc(uint64_t *bytes, FILE *fd, const char *prefix1, const char 
 	char *enc = buffer_init(enc_size);
 	cf_b64_encode(buffer, size, enc);
 
-	if (!text_output_data(bytes, fd, prefix1, prefix2, enc, enc_size)) {
+	if (!text_output_data(bytes, fd, prefix2, enc, enc_size)) {
 		buffer_free(enc, enc_size);
 		return false;
 	}
@@ -187,11 +206,41 @@ text_output_data_enc(uint64_t *bytes, FILE *fd, const char *prefix1, const char 
 ///
 /// @result         `true`, if successful.
 ///
+void escape_and_quote_str (char *str, char *estr)
+{
+	int i = 0;
+	estr[i++] = '"';
+	while (*str)
+	{
+		if (*str < 32 || *str > 126)
+			estr[i] = ' ';
+		else if (*str == '"')
+		{
+			estr[i++] = '\\';
+			estr[i] = '"';
+		}
+		else
+			estr[i] = *str;
+		i++;
+		str++;
+	}
+	estr[i++] = '"';
+	estr[i] = 0;
+//	printf ("ESTR=%s|\n", estr);
+//	exit(0);
+}
+
 static bool
 text_output_string(uint64_t *bytes, FILE *fd, const char *prefix1, const char *prefix2, as_val *val)
 {
 	as_string *v = as_string_fromval(val);
-	return text_output_data(bytes, fd, prefix1, prefix2, v->value, v->len);
+	char *estr = (char *) malloc (strlen(v->value) * 2 + 3);
+	escape_and_quote_str (v->value, estr);
+	//escape_and_quote_str ("THIS \"IS\" TEST", estr);
+	bool rv = text_output_data(bytes, fd, prefix2, estr, strlen(estr));
+
+	free (estr);
+	return rv;
 }
 
 ///
@@ -209,7 +258,7 @@ static bool
 text_output_geojson(uint64_t *bytes, FILE *fd, const char *prefix1, const char *prefix2, as_val *val)
 {
 	as_geojson *v = as_geojson_fromval(val);
-	return text_output_data(bytes, fd, prefix1, prefix2, v->value, v->len);
+	return text_output_data(bytes, fd, prefix2, v->value, v->len);
 }
 
 ///
@@ -230,8 +279,8 @@ text_output_bytes(uint64_t *bytes, FILE *fd, bool compact, const char *prefix1, 
 {
 	as_bytes *v = as_bytes_fromval(val);
 	return compact ?
-			text_output_data(bytes, fd, prefix1, prefix2, v->value, v->size) :
-			text_output_data_enc(bytes, fd, prefix1, prefix2, v->value, v->size);
+			text_output_data(bytes, fd, prefix2, v->value, v->size) :
+			text_output_data_enc(bytes, fd, prefix2, v->value, v->size);
 }
 
 ///
@@ -282,11 +331,14 @@ text_output_key(uint64_t *bytes, FILE *fd, bool compact, as_val *key)
 static bool
 text_output_value(uint64_t *bytes, FILE *fd, bool compact, const char *bin_name, as_val *val)
 {
-	if (val == NULL || val->type == AS_NIL) {
-		if (fprintf_bytes(bytes, fd, "- N %s\n", bin_name) < 0) {
-			err_code("Error while writing NIL value to backup file");
-			return false;
-		}
+	if (val == NULL || val->type == AS_NIL)
+	{
+		//if (fprintf_bytes(bytes, fd, "|%s#|", bin_name) < 0)
+		//if (fprintf_bytes(bytes, fd, ",") < 0)
+		//{
+		//	err_code("Error while writing NIL value to backup file");
+		//	return false;
+		//}
 
 		return true;
 	}
@@ -358,6 +410,7 @@ text_put_record(uint64_t *bytes, FILE *fd, bool compact, const as_record *rec)
 		return false;
 	}
 
+/*
 	if (fprintf_bytes(bytes, fd, "+ n %s\n+ d %s\n", escape(rec->key.ns), enc) < 0) {
 		err_code("Error while writing record meta data to backup file [1]");
 		return false;
@@ -382,19 +435,53 @@ text_put_record(uint64_t *bytes, FILE *fd, bool compact, const as_record *rec)
 		err_code("Error while writing record meta data to backup file [3]");
 		return false;
 	}
+*/
 
-	for (int32_t i = 0; i < rec->bins.size; ++i) {
-		as_bin *bin = &rec->bins.entries[i];
+	/* for bins passed on command line */
+	for (uint32_t j = 0; j < cmdbins.bincount; ++j) {
 
-		if (strcmp(bin->name, "LDTCONTROLBIN") == 0) {
-			continue;
+		bool bin_present_in_data = false;
+		as_bin *bin;
+		char *userbinname = cmdbins.inputbins[j];
+		//printf ("userbinname= %s\n", userbinname);
+		for (int32_t i = 0; i < rec->bins.size; ++i) {
+			bin = &rec->bins.entries[i];
+
+			if (strcmp(bin->name, "LDTCONTROLBIN") == 0 || strcmp(bin->name, "") == 0) {
+				continue;
+			}
+
+			if (strcmp (userbinname, bin->name) != 0)
+				continue;
+			else
+			{
+				bin_present_in_data = true;
+				break;
+			}
 		}
-
-		if (!text_output_value(bytes, fd, compact, escape(bin->name), (as_val *)bin->valuep)) {
-			err("Error while writing record bin %s", bin->name);
-			return false;
+		if (bin_present_in_data == false)
+		{
+			if (!text_output_value(bytes, fd, compact, escape(userbinname), NULL)) {
+				err("Error while writing EMPTY record bin %s", userbinname);
+				return false;
+			}
+			if (j<(cmdbins.bincount-1))
+				text_output_data_1(bytes, fd, "", ",", 1);
 		}
+		else if (bin_present_in_data)
+		{
+			if (!text_output_value(bytes, fd, compact, escape(bin->name), (as_val *)bin->valuep)) {
+				err("Error while writing record bin %s", bin->name);
+				return false;
+			}
+			if (j<(cmdbins.bincount-1))
+				text_output_data_1(bytes, fd, "", ",", 1);
+		}
+		bin_present_in_data = false;
+		//printf ("checking next userbin\n");
 	}
+	//printf ("checked all userbins\n");
+	text_output_data_1(bytes, fd, "", "\n", 1);
 
 	return true;
 }
